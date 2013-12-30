@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python2
 
 # Shane Tully (shane@shanetully.com)
 # shanetully.com
@@ -29,13 +29,12 @@ import sys
 
 from os                    import path
 from getpass               import getpass
-from gmusicapi             import Webclient
+from gmusicapi             import Webclient, Mobileclient
 from mutagen.easyid3       import EasyID3
 from mutagen.easymp4       import EasyMP4
 from mutagen.flac          import FLAC
 from mutagen.id3           import ID3NoHeaderError
 from xml.etree.ElementTree import parse
-
 
 def main():
     [user, root_dir, playlists] = parse_cmdline_args()
@@ -55,14 +54,15 @@ def main():
 
     # Get all songs in the library
     print "Retrieving all songs in library. This may take a minute..."
-    remote_library = api.get_all_songs()
+    remote_library = api[0].get_all_songs()
 
     for playlist in playlists:
         print "Syncing playlist: " + playlist
         process_playlist(api, playlist, remote_library, root_dir)
 
     # Be a good citizen and log out
-    api.logout()
+    api[0].logout()
+    api[1].logout()
     print "Bye!"
     exit(0)
 
@@ -84,6 +84,7 @@ def parse_cmdline_args():
 
 def login_to_google_music(user):
     api = Webclient()
+    apiMobile = Mobileclient()
     attempts = 0
 
     while attempts < 3:
@@ -102,8 +103,8 @@ def login_to_google_music(user):
             password = getpass()
 
         print "\nLogging in..."
-        if api.login(user, password):
-            return api
+        if apiMobile.login(user,password) and api.login(user, password):
+            return api, apiMobile
         else:
             print "Login failed."
             # Set the username to none so it is prompted to be re-entered on the next loop iteration
@@ -168,7 +169,7 @@ def parse_xml(local_playlist_path):
             elif field.tag == "{http://xspf.org/ns/0/}creator":
                 new_track['artist'] = field.text.strip()
             elif field.tag == "{http://xspf.org/ns/0/}album":
-                new_track['album'] = field.text.strip()
+                new_track['album'] = field.text is not None and field.text.strip() or ""
             elif field.tag == "{http://xspf.org/ns/0/}location":
                 new_track['path'] = field.text.strip()
         tracks.append(new_track)
@@ -264,10 +265,21 @@ def find_track(l_track,  track_list):
     else:
         return False
 
+def find_track_or_add_it(mobileApi, l_track, track_list):
+    matched_track = find_track(l_track, track_list)
+    if not matched_track:
+        tracksCandidates = [track["track"] for track in mobileApi.search_all_access(l_track['title'])["song_hits"]]
+        all_access_matched_track = find_track(l_track, tracksCandidates)
+        if all_access_matched_track:
+            print "Adding track "+ all_access_matched_track['artist']+" - "+all_access_matched_track['title']+" to google music library"
+            all_access_matched_track['id'] = mobileApi.add_aa_track(all_access_matched_track['storeId'])
+            matched_track = all_access_matched_track
+    return matched_track
+
 
 def sync_playlist(api,  remote_library,  local_tracks,  local_playlist_name):
     # Get all available playlists from Google Music
-    remote_playlists = api.get_all_playlist_ids()
+    remote_playlists = api[0].get_all_playlist_ids()
 
     # Try to find the playlist if it already exists
     remote_playlist_id = None
@@ -281,10 +293,12 @@ def sync_playlist(api,  remote_library,  local_tracks,  local_playlist_name):
     # If the playlist wasn't found, create it
     if remote_playlist_id is None:
         print "Playlist not found on Google Music. Creating it."
-        remote_playlist_id = api.create_playlist(local_playlist_name)
+        print "You should create manually the playlist: " + local_playlist_name
+        exit(0)
+        #remote_playlist_id = api.create_playlist(local_playlist_name)
 
     # Get the songs on the playlist
-    remote_tracks = api.get_playlist_songs(remote_playlist_id)
+    remote_tracks = api[0].get_playlist_songs(remote_playlist_id)
 
     # Check if each track in the local playlist is on the Google Music playlist
     tracks_to_add_names = []
@@ -297,7 +311,7 @@ def sync_playlist(api,  remote_library,  local_tracks,  local_playlist_name):
         # Add the track to the playlist
         # Find the song ID
         local_track_id = None
-        matched_track = find_track(local_track, remote_library)
+        matched_track = find_track_or_add_it(api[1], local_track, remote_library)
         if matched_track:
             local_track_id = matched_track['id']
             tracks_to_add_names.append(matched_track['artist'] + " - " + matched_track['title'])
@@ -320,7 +334,7 @@ def sync_playlist(api,  remote_library,  local_tracks,  local_playlist_name):
     if raw_input("Is this okay? (y,n) ") == "y":
         # Finally, add the new track to the playlist
         for track_id in tracks_to_add_ids:
-            api.add_songs_to_playlist(remote_playlist_id, track_id)
+            api[0].add_songs_to_playlist(remote_playlist_id, track_id)
         print "\nTracks added to playlist."
     else:
         print "Sorry!"
